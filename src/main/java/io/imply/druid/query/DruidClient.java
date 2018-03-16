@@ -25,7 +25,6 @@ import com.google.inject.Binder;
 import com.google.inject.Injector;
 import com.google.inject.Key;
 import com.google.inject.Module;
-import com.metamx.common.guava.Sequence;
 import com.metamx.common.lifecycle.Lifecycle;
 import com.metamx.common.logger.Logger;
 import com.metamx.emitter.core.NoopEmitter;
@@ -41,11 +40,8 @@ import io.druid.guice.annotations.Self;
 import io.druid.guice.annotations.Smile;
 import io.druid.guice.http.DruidHttpClientConfig;
 import io.druid.initialization.Initialization;
-import io.druid.query.DruidProcessingConfig;
-import io.druid.query.MapQueryToolChestWarehouse;
-import io.druid.query.Query;
-import io.druid.query.QueryToolChestWarehouse;
-import io.druid.query.QueryWatcher;
+import io.druid.java.util.common.guava.Sequence;
+import io.druid.query.*;
 import io.druid.server.DruidNode;
 
 import java.io.Closeable;
@@ -54,6 +50,8 @@ import java.util.Map;
 
 public class DruidClient implements Closeable
 {
+
+
   private static final Logger log = new Logger(DruidClient.class);
 
   private static final Injector INJECTOR;
@@ -64,49 +62,55 @@ public class DruidClient implements Closeable
   private static final DruidHttpClientConfig HTTP_CLIENT_CONFIG;
   private static final ServiceEmitter SERVICE_EMITTER;
 
+  /**
+   * 协议类型,0.11.0API中添加该项,参考0.10.x中写的默认就是http,此处也传递http,应该没问题
+   */
+  public static final String SCHEME = "http";
+
   static {
+    //注入这里存在问题,不知道原因为何,待查找
     INJECTOR = Initialization.makeInjectorWithModules(
-        GuiceInjectors.makeStartupInjector(),
-        ImmutableList.of(
-            new Module()
-            {
-              @Override
-              public void configure(Binder binder)
-              {
-                JsonConfigProvider.bindInstance(
-                    binder,
-                    Key.get(DruidNode.class, Self.class),
-                    new DruidNode("druid-client", null, null)
-                );
-              }
-            },
-            new Module()
-            {
-              @Override
-              public void configure(Binder binder)
-              {
-                binder.bind(QueryToolChestWarehouse.class).to(MapQueryToolChestWarehouse.class);
-                JsonConfigProvider.bind(binder, "druid.client.http", DruidHttpClientConfig.class);
+            GuiceInjectors.makeStartupInjector(),
+            ImmutableList.of(
+                    new Module()
+                    {
+                      @Override
+                      public void configure(Binder binder)
+                      {
+                        JsonConfigProvider.bindInstance(
+                                binder,
+                                Key.get(DruidNode.class, Self.class),
+                                new DruidNode("druid-client", null, null, null, null, true, false)
+                        );
+                      }
+                    },
+                    new Module()
+                    {
+                      @Override
+                      public void configure(Binder binder)
+                      {
+                        binder.bind(QueryToolChestWarehouse.class).to(MapQueryToolChestWarehouse.class);
+                        JsonConfigProvider.bind(binder, "druid.client.http", DruidHttpClientConfig.class);
 
-                // Set up dummy DruidProcessingConfig to avoid large offheap buffer generation.
-                final DruidProcessingConfig dummyConfig = new DruidProcessingConfig()
-                {
-                  @Override
-                  public int intermediateComputeSizeBytes()
-                  {
-                    return 1;
-                  }
+                        // Set up dummy DruidProcessingConfig to avoid large offheap buffer generation.
+                        final DruidProcessingConfig dummyConfig = new DruidProcessingConfig()
+                        {
+                          @Override
+                          public int intermediateComputeSizeBytes()
+                          {
+                            return 1;
+                          }
 
-                  @Override
-                  public String getFormatString()
-                  {
-                    return "dummy";
-                  }
-                };
-                binder.bind(DruidProcessingConfig.class).toInstance(dummyConfig);
-              }
-            }
-        )
+                          @Override
+                          public String getFormatString()
+                          {
+                            return "dummy";
+                          }
+                        };
+                        binder.bind(DruidProcessingConfig.class).toInstance(dummyConfig);
+                      }
+                    }
+            )
     );
     WAREHOUSE = INJECTOR.getInstance(QueryToolChestWarehouse.class);
     WATCHER = new QueryWatcher()
@@ -141,30 +145,31 @@ public class DruidClient implements Closeable
   public static DruidClient create(final String host)
   {
     final HttpClientConfig.Builder builder = HttpClientConfig
-        .builder()
-        .withNumConnections(HTTP_CLIENT_CONFIG.getNumConnections())
-        .withReadTimeout(HTTP_CLIENT_CONFIG.getReadTimeout());
+            .builder()
+            .withNumConnections(HTTP_CLIENT_CONFIG.getNumConnections())
+            .withReadTimeout(HTTP_CLIENT_CONFIG.getReadTimeout());
 
     final Lifecycle lifecycle = new Lifecycle();
     final HttpClient httpClient = HttpClientInit.createClient(builder.build(), lifecycle);
     final DirectDruidClient directDruidClient = new DirectDruidClient(
-        WAREHOUSE,
-        WATCHER,
-        SMILE_MAPPER,
-        httpClient,
-        host,
-        SERVICE_EMITTER
+            WAREHOUSE,
+            WATCHER,
+            SMILE_MAPPER,
+            httpClient,
+            SCHEME,
+            host,
+            SERVICE_EMITTER
     );
     return new DruidClient(
-        directDruidClient,
-        new Closeable()
-        {
-          @Override
-          public void close() throws IOException
-          {
-            lifecycle.stop();
-          }
-        }
+            directDruidClient,
+            new Closeable()
+            {
+              @Override
+              public void close() throws IOException
+              {
+                lifecycle.stop();
+              }
+            }
     );
   }
 
@@ -180,12 +185,13 @@ public class DruidClient implements Closeable
   public static DruidClient create(final String host, final HttpClient httpClient)
   {
     final DirectDruidClient directDruidClient = new DirectDruidClient(
-        WAREHOUSE,
-        WATCHER,
-        SMILE_MAPPER,
-        httpClient,
-        host,
-        SERVICE_EMITTER
+            WAREHOUSE,
+            WATCHER,
+            SMILE_MAPPER,
+            httpClient,
+            SCHEME,
+            host,
+            SERVICE_EMITTER
     );
     return new DruidClient(directDruidClient, null);
   }
@@ -195,6 +201,8 @@ public class DruidClient implements Closeable
     return JSON_MAPPER;
   }
 
+  //此处将Sequence修改为io.druid包中Sequence,因为directDruidClient.run在0.11.0返回的为io.druid.java.util.common.guava.Sequence
+  //此处修改不知道是否正确
   public <T> Sequence<T> execute(final Query<T> query)
   {
     final Map<String, Object> context = Maps.newHashMap();
@@ -204,7 +212,8 @@ public class DruidClient implements Closeable
     catch (Exception e) {
       throw Throwables.propagate(e);
     }
-    return directDruidClient.run(query, context);
+
+    return directDruidClient.run(QueryPlus.wrap(query), context);
   }
 
   public <T> Sequence<T> execute(final Map<String, Object> queryMap, final Class<? extends Query<T>> queryClass)
@@ -212,7 +221,6 @@ public class DruidClient implements Closeable
     return execute(JSON_MAPPER.convertValue(queryMap, queryClass));
   }
 
-  @Override
   public void close() throws IOException
   {
     if (closeable != null) {
